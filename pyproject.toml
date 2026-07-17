@@ -1,0 +1,3 @@
+[tool.pytest.ini_options]
+markers = ["slow: integration tests that load the real InsightFace model"]
+addopts = "-m 'not slow'"
