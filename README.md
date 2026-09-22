@@ -28,12 +28,17 @@ Every endpoint (except `GET /health`) requires the `X-API-Key` header.
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/users` | Enroll a new user: multipart `image` + `name` + `email` + `phone` |
-| POST | `/users/{id}/faces?mode=replace\|append` | Update photos (default `replace`; `append` adds an extra photo) |
+| POST | `/users` | Enroll a new user: multipart `image` + `name` + `email` + `phone` (409 if the trio exists) |
 | POST | `/recognize` | Recognize an image — always returns 200, `matched: true/false` |
-| GET | `/users` | List users with their photo counts |
-| DELETE | `/users/{id}` | Delete a user + all photos/embeddings |
+| POST | `/users/{id}/faces?mode=replace\|append` | Update photos by id (default `replace`; `append` adds an extra photo) |
+| GET | `/users?q=&limit=&offset=` | List users (paginated + search). Returns `{users, total, limit, offset}` |
+| DELETE | `/users/{id}` | Delete a user by id + all photos/embeddings |
+| **PUT** | `/users/by-phone/{phone}` | **Idempotent enroll** — create or update info + set one face (201 created / 200 updated). Used by the backend on approval. |
+| **PATCH** | `/users/by-phone/{phone}` | Update identity fields (`name`, `email`, `new_phone`) without touching the face. |
+| **DELETE** | `/users/by-phone/{phone}` | Delete the user with this phone. |
 | GET | `/health` | Health check (no auth) |
+
+The `by-phone` endpoints exist so the backend — which identifies people by phone — can keep this service in sync when an admin approves, edits, or deletes a user.
 
 ### Examples
 

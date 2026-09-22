@@ -62,15 +62,55 @@ def get_user(conn: sqlite3.Connection, user_id: int) -> dict | None:
     return dict(row) if row else None
 
 
-def list_users(conn: sqlite3.Connection) -> list[dict]:
+def get_user_by_phone(conn: sqlite3.Connection, phone: str) -> dict | None:
+    row = conn.execute(
+        "SELECT id, name, email, phone FROM users WHERE phone = ?", (phone,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def update_user_info(
+    conn: sqlite3.Connection, user_id: int, name: str, email: str, phone: str
+) -> None:
+    try:
+        conn.execute(
+            "UPDATE users SET name = ?, email = ?, phone = ? WHERE id = ?",
+            (name, email, phone, user_id),
+        )
+    except sqlite3.IntegrityError as exc:
+        raise DuplicateUserError(
+            f"user ({name}, {email}, {phone}) already exists"
+        ) from exc
+    conn.commit()
+
+
+def list_users(
+    conn: sqlite3.Connection,
+    search: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> tuple[list[dict], int]:
+    """Return (page of users with face_count, total matching count)."""
+    where, params = "", []
+    if search:
+        where = "WHERE u.name LIKE ? OR u.email LIKE ? OR u.phone LIKE ?"
+        like = f"%{search}%"
+        params = [like, like, like]
+
     rows = conn.execute(
-        """
+        f"""
         SELECT u.id, u.name, u.email, u.phone, u.created_at, COUNT(f.id) AS face_count
         FROM users u LEFT JOIN faces f ON f.user_id = u.id
+        {where}
         GROUP BY u.id ORDER BY u.id
-        """
+        LIMIT ? OFFSET ?
+        """,
+        (*params, limit, offset),
     ).fetchall()
-    return [dict(r) for r in rows]
+    total = conn.execute(
+        f"SELECT COUNT(*) AS n FROM users u {where}", params
+    ).fetchone()["n"]
+    return [dict(r) for r in rows], total
 
 
 def delete_user(conn: sqlite3.Connection, user_id: int) -> list[str] | None:

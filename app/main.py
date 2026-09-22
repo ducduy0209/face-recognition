@@ -39,8 +39,15 @@ def create_app(settings: Settings | None = None, engine=None) -> FastAPI:
     def _error(status: int, detail: str, reason: str) -> JSONResponse:
         return JSONResponse(status_code=status, content={"detail": detail, "reason": reason})
 
+    class ImageTooLargeError(Exception):
+        pass
+
     def _extract_faces(image: UploadFile):
-        image_bytes = image.file.read()
+        # Read one byte past the cap: the service runs with a single worker,
+        # so one oversized upload held in RAM stalls every check-in.
+        image_bytes = image.file.read(settings.max_image_bytes + 1)
+        if len(image_bytes) > settings.max_image_bytes:
+            raise ImageTooLargeError
         return image_bytes, app.state.engine.extract(image_bytes)
 
     def _validate_single_face(faces) -> str | None:
@@ -61,6 +68,15 @@ def create_app(settings: Settings | None = None, engine=None) -> FastAPI:
         for p in paths:
             Path(p).unlink(missing_ok=True)
 
+    def _replace_face(user_id: int, image_bytes: bytes, embedding) -> None:
+        """Drop the user's existing faces and store the given one. Caller holds the write lock."""
+        old_paths = db.delete_faces(app.state.conn, user_id)
+        app.state.matcher.remove_user(user_id)
+        _delete_files(old_paths)
+        image_path = _save_image(image_bytes)
+        face_id = db.add_face(app.state.conn, user_id, embedding, image_path)
+        app.state.matcher.add(face_id, user_id, embedding)
+
     @app.get("/health")
     def health():
         return {"status": "ok", "faces": len(app.state.matcher)}
@@ -74,6 +90,8 @@ def create_app(settings: Settings | None = None, engine=None) -> FastAPI:
     ):
         try:
             image_bytes, faces = _extract_faces(image)
+        except ImageTooLargeError:
+            return _error(413, "image too large", "image_too_large")
         except InvalidImageError:
             return _error(422, "cannot decode image", "invalid_image")
         reason = _validate_single_face(faces)
@@ -93,6 +111,8 @@ def create_app(settings: Settings | None = None, engine=None) -> FastAPI:
     def recognize(image: UploadFile = File(...)):
         try:
             _, faces = _extract_faces(image)
+        except ImageTooLargeError:
+            return _error(413, "image too large", "image_too_large")
         except InvalidImageError:
             return _error(422, "cannot decode image", "invalid_image")
         if not faces:
@@ -116,6 +136,8 @@ def create_app(settings: Settings | None = None, engine=None) -> FastAPI:
     ):
         try:
             image_bytes, faces = _extract_faces(image)
+        except ImageTooLargeError:
+            return _error(413, "image too large", "image_too_large")
         except InvalidImageError:
             return _error(422, "cannot decode image", "invalid_image")
         reason = _validate_single_face(faces)
@@ -136,8 +158,95 @@ def create_app(settings: Settings | None = None, engine=None) -> FastAPI:
         return {"user_id": user_id, "face_count": face_count}
 
     @app.get("/users", dependencies=[Depends(verify_api_key)])
-    def list_users():
-        return db.list_users(app.state.conn)
+    def list_users(
+        q: str | None = Query(None, description="search name/email/phone"),
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+    ):
+        users, total = db.list_users(app.state.conn, search=q, limit=limit, offset=offset)
+        return {"users": users, "total": total, "limit": limit, "offset": offset}
+
+    # --- Operations keyed by phone (used by the backend to stay in sync) ---
+    # Declared before the /users/{user_id} routes so the literal "by-phone"
+    # segment is never captured by the int user_id routes.
+
+    @app.put("/users/by-phone/{phone}", dependencies=[Depends(verify_api_key)])
+    def upsert_by_phone(
+        phone: str,
+        image: UploadFile = File(...),
+        name: str = Form(...),
+        email: str = Form(...),
+    ):
+        """Idempotent enroll: create the user or update their info, then set a
+        single face. Lets the backend re-enroll on re-approval without a 409."""
+        try:
+            image_bytes, faces = _extract_faces(image)
+        except ImageTooLargeError:
+            return _error(413, "image too large", "image_too_large")
+        except InvalidImageError:
+            return _error(422, "cannot decode image", "invalid_image")
+        reason = _validate_single_face(faces)
+        if reason:
+            return _error(422, f"image rejected: {reason}", reason)
+        with app.state.write_lock:
+            existing = db.get_user_by_phone(app.state.conn, phone)
+            created = existing is None
+            try:
+                if created:
+                    user_id = db.create_user(app.state.conn, name, email, phone)
+                else:
+                    user_id = existing["id"]
+                    db.update_user_info(app.state.conn, user_id, name, email, phone)
+            except db.DuplicateUserError:
+                return _error(409, "user already exists", "duplicate_user")
+            _replace_face(user_id, image_bytes, faces[0].embedding)
+            face_count = db.count_faces(app.state.conn, user_id)
+        return JSONResponse(
+            status_code=201 if created else 200,
+            content={
+                "user_id": user_id,
+                "name": name,
+                "email": email,
+                "phone": phone,
+                "face_count": face_count,
+                "created": created,
+            },
+        )
+
+    @app.patch("/users/by-phone/{phone}", dependencies=[Depends(verify_api_key)])
+    def update_info_by_phone(
+        phone: str,
+        name: str | None = Form(None),
+        email: str | None = Form(None),
+        new_phone: str | None = Form(None),
+    ):
+        """Update identity fields without touching the enrolled face."""
+        with app.state.write_lock:
+            existing = db.get_user_by_phone(app.state.conn, phone)
+            if existing is None:
+                return _error(404, "user not found", "user_not_found")
+            try:
+                db.update_user_info(
+                    app.state.conn,
+                    existing["id"],
+                    name if name is not None else existing["name"],
+                    email if email is not None else existing["email"],
+                    new_phone if new_phone is not None else existing["phone"],
+                )
+            except db.DuplicateUserError:
+                return _error(409, "user already exists", "duplicate_user")
+            return db.get_user(app.state.conn, existing["id"])
+
+    @app.delete("/users/by-phone/{phone}", dependencies=[Depends(verify_api_key)])
+    def delete_by_phone(phone: str):
+        with app.state.write_lock:
+            existing = db.get_user_by_phone(app.state.conn, phone)
+            if existing is None:
+                return _error(404, "user not found", "user_not_found")
+            paths = db.delete_user(app.state.conn, existing["id"])
+            app.state.matcher.remove_user(existing["id"])
+            _delete_files(paths or [])
+        return Response(status_code=204)
 
     @app.delete("/users/{user_id}", dependencies=[Depends(verify_api_key)])
     def delete_user(user_id: int):

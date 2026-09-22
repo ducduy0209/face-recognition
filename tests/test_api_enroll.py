@@ -51,3 +51,22 @@ def test_enroll_rejects_bad_images(client):
         r = client.post("/users", data=data, files=upload(content))
         assert r.status_code == 422, content
         assert r.json()["reason"] == reason
+
+
+def test_enroll_rejects_oversized_image(client):
+    """One oversized upload would otherwise sit in RAM and stall the single worker."""
+    oversized = b"face:an" + b"\0" * (15 * 1024 * 1024)
+    r = client.post(
+        "/users",
+        data={"name": "An", "email": "a@x.com", "phone": "0901"},
+        files=upload(oversized),
+    )
+    assert r.status_code == 413
+    assert r.json()["reason"] == "image_too_large"
+
+
+def test_recognize_rejects_oversized_image(client):
+    oversized = b"face:an" + b"\0" * (15 * 1024 * 1024)
+    r = client.post("/recognize", files=upload(oversized))
+    assert r.status_code == 413
+    assert r.json()["reason"] == "image_too_large"

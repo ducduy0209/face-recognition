@@ -13,10 +13,28 @@ def test_list_users(client):
     _enroll(client, seed="binh", name="Binh", email="b@x.com", phone="0902")
     r = client.get("/users")
     assert r.status_code == 200
-    users = r.json()
+    body = r.json()
+    assert body["total"] == 2
+    assert body["limit"] == 50 and body["offset"] == 0
+    users = body["users"]
     assert len(users) == 2
     assert users[0]["face_count"] == 1
     assert set(users[0]) == {"id", "name", "email", "phone", "created_at", "face_count"}
+
+
+def test_list_users_search_and_paginate(client):
+    _enroll(client, seed="an", name="An", email="a@x.com", phone="0901")
+    _enroll(client, seed="binh", name="Binh", email="b@x.com", phone="0902")
+
+    # search matches name/email/phone
+    r = client.get("/users", params={"q": "Binh"})
+    assert r.json()["total"] == 1
+    assert r.json()["users"][0]["phone"] == "0902"
+
+    # pagination returns the page slice but the full total
+    r = client.get("/users", params={"limit": 1, "offset": 0})
+    body = r.json()
+    assert body["total"] == 2 and len(body["users"]) == 1
 
 
 def test_update_faces_append(client):
@@ -58,7 +76,7 @@ def test_delete_user(client):
     uid = _enroll(client)
     r = client.delete(f"/users/{uid}")
     assert r.status_code == 204
-    assert client.get("/users").json() == []
+    assert client.get("/users").json()["total"] == 0
     assert client.post("/recognize", files=upload(b"face:an")).json()["matched"] is False
 
 

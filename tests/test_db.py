@@ -42,7 +42,8 @@ def test_list_users_with_face_count(conn):
     uid = db.create_user(conn, "An", "an@x.com", "0901")
     db.add_face(conn, uid, _emb(1), "a.jpg")
     db.add_face(conn, uid, _emb(2), "b.jpg")
-    users = db.list_users(conn)
+    users, total = db.list_users(conn)
+    assert total == 1
     assert len(users) == 1
     assert users[0]["face_count"] == 2
 

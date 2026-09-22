@@ -10,6 +10,7 @@ class Settings:
     model_name: str = "buffalo_l"
     data_dir: Path = Path("data")
     min_face_size: int = 80
+    max_image_bytes: int = 15 * 1024 * 1024
 
 
 def load_settings() -> Settings:
@@ -22,4 +23,7 @@ def load_settings() -> Settings:
         model_name=os.environ.get("MODEL_NAME", "buffalo_l"),
         data_dir=Path(os.environ.get("DATA_DIR", "data")),
         min_face_size=int(os.environ.get("MIN_FACE_SIZE", "80")),
+        max_image_bytes=int(
+            os.environ.get("MAX_IMAGE_BYTES", str(15 * 1024 * 1024))
+        ),
     )
