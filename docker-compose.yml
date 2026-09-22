@@ -1,11 +1,30 @@
 services:
   face-api:
     build: .
+    # Published on the loopback interface only: the backend reaches this
+    # service over `checkin-net` by name, and binding to 127.0.0.1 keeps the
+    # API (and its /docs page) off the public internet while still letting you
+    # curl it from the server itself for debugging.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     environment:
       API_KEY: ${API_KEY:?set API_KEY in .env}
       MATCH_THRESHOLD: ${MATCH_THRESHOLD:-0.40}
+      MAX_IMAGE_BYTES: ${MAX_IMAGE_BYTES:-15728640}
     volumes:
+      # SQLite + the enrolled face images. Bind-mounted, so they survive
+      # `docker compose down` and every rebuild.
       - ./data:/srv/data
     restart: unless-stopped
+    networks:
+      - default
+      - checkin-net
+
+networks:
+  # Shared with the BE_Checkin_2025 compose project. Create it once per server:
+  #   docker network create checkin-net
+  # Leave this out and the backend can only reach the service through the host
+  # gateway IP, which changes with the Docker configuration.
+  checkin-net:
+    external: true
+    name: checkin-net
