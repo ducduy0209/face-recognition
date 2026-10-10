@@ -20,23 +20,29 @@ class FakeEngine:
     - b"face:<seed>"        -> 1 large face (min_side=200), embedding derived from seed
     - b"face:<seed>:small"  -> 1 small face (min_side=40)
     - b"faces:<a>,<b>"      -> multiple faces, first one is the largest
+    - b"faces:<a>@200,<b>@80" -> multiple faces with the given min_side each
+    - b"tight:<seed>"       -> a selfie taken too close: no face unless the
+                               caller asks for the padded retry (pad_retry=True)
     - b"noface"             -> no face
     - b"garbage"            -> raise InvalidImageError
     Same seed -> same embedding (score ~1.0); different seeds -> nearly orthogonal (score ~0).
     """
 
-    def extract(self, image_bytes: bytes) -> list[DetectedFace]:
+    def extract(self, image_bytes: bytes, pad_retry: bool = False) -> list[DetectedFace]:
         text = image_bytes.decode(errors="replace")
         if text == "garbage":
             raise InvalidImageError("cannot decode image")
         if text == "noface":
             return []
+        if text.startswith("tight:"):
+            seed = text[len("tight:"):]
+            return [DetectedFace(embedding_from_seed(seed), 400.0)] if pad_retry else []
         if text.startswith("faces:"):
-            seeds = text[len("faces:"):].split(",")
-            return [
-                DetectedFace(embedding_from_seed(s), 200.0 - 10.0 * i)
-                for i, s in enumerate(seeds)
-            ]
+            faces = []
+            for i, spec in enumerate(text[len("faces:"):].split(",")):
+                seed, _, size = spec.partition("@")
+                faces.append(DetectedFace(embedding_from_seed(seed), float(size or 200.0 - 10.0 * i)))
+            return faces
         if text.startswith("face:"):
             parts = text.split(":")
             size = 40.0 if parts[-1] == "small" else 200.0

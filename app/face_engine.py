@@ -4,6 +4,10 @@ import cv2
 import numpy as np
 
 
+# Border added on each side for the retry, as a share of the longer side
+PAD_RATIO = 0.25
+
+
 class InvalidImageError(Exception):
     pass
 
@@ -21,7 +25,7 @@ class FaceEngine:
         self._app = FaceAnalysis(name=model_name, providers=["CPUExecutionProvider"])
         self._app.prepare(ctx_id=-1, det_size=(640, 640))
 
-    def extract(self, image_bytes: bytes) -> list[DetectedFace]:
+    def extract(self, image_bytes: bytes, pad_retry: bool = False) -> list[DetectedFace]:
         buf = np.frombuffer(image_bytes, dtype=np.uint8)
         if buf.size == 0:
             raise InvalidImageError("empty image")
@@ -29,6 +33,16 @@ class FaceEngine:
         if img is None:
             raise InvalidImageError("cannot decode image")
         faces = self._app.get(img)
+        if not faces and pad_retry:
+            # A selfie held too close fills the frame with the forehead or chin
+            # cut off, and the detector — trained on faces with room around
+            # them — finds nothing. A border gives it that room back. Padding
+            # does not rescale, so box sizes stay in the original's pixels.
+            pad = int(max(img.shape[:2]) * PAD_RATIO)
+            img = cv2.copyMakeBorder(
+                img, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=(255, 255, 255)
+            )
+            faces = self._app.get(img)
         detected = []
         for f in faces:
             x1, y1, x2, y2 = f.bbox

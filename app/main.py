@@ -12,6 +12,9 @@ from .config import Settings, load_settings
 from .face_engine import InvalidImageError
 from .matcher import Matcher
 
+# A second face is tolerated when the largest is at least this many times its size
+DOMINANT_FACE_RATIO = 2.0
+
 
 def create_app(settings: Settings | None = None, engine=None) -> FastAPI:
     settings = settings or load_settings()
@@ -42,18 +45,28 @@ def create_app(settings: Settings | None = None, engine=None) -> FastAPI:
     class ImageTooLargeError(Exception):
         pass
 
-    def _extract_faces(image: UploadFile):
+    def _extract_faces(image: UploadFile, pad_retry: bool = False):
         # Read one byte past the cap: the service runs with a single worker,
         # so one oversized upload held in RAM stalls every check-in.
         image_bytes = image.file.read(settings.max_image_bytes + 1)
         if len(image_bytes) > settings.max_image_bytes:
             raise ImageTooLargeError
-        return image_bytes, app.state.engine.extract(image_bytes)
+        return image_bytes, app.state.engine.extract(image_bytes, pad_retry=pad_retry)
+
+    def _extract_enrollment_faces(image: UploadFile):
+        # Enrollment photos get the padded retry for selfies held too close.
+        # /recognize does not: check-in sends a frame every second, empty
+        # camera included, and a second pass would double the CPU per frame.
+        return _extract_faces(image, pad_retry=True)
 
     def _validate_single_face(faces) -> str | None:
+        """Faces are sorted largest first; on success faces[0] is the one to enroll."""
         if len(faces) == 0:
             return "no_face"
-        if len(faces) > 1:
+        # Strangers in the background are fine when the member clearly
+        # dominates the photo. Two faces of similar size could be either
+        # person, so those are still rejected.
+        if len(faces) > 1 and faces[0].min_side < DOMINANT_FACE_RATIO * faces[1].min_side:
             return "multiple_faces"
         if faces[0].min_side < settings.min_face_size:
             return "face_too_small"
@@ -89,7 +102,7 @@ def create_app(settings: Settings | None = None, engine=None) -> FastAPI:
         phone: str = Form(...),
     ):
         try:
-            image_bytes, faces = _extract_faces(image)
+            image_bytes, faces = _extract_enrollment_faces(image)
         except ImageTooLargeError:
             return _error(413, "image too large", "image_too_large")
         except InvalidImageError:
@@ -135,7 +148,7 @@ def create_app(settings: Settings | None = None, engine=None) -> FastAPI:
         mode: str = Query("replace", pattern="^(replace|append)$"),
     ):
         try:
-            image_bytes, faces = _extract_faces(image)
+            image_bytes, faces = _extract_enrollment_faces(image)
         except ImageTooLargeError:
             return _error(413, "image too large", "image_too_large")
         except InvalidImageError:
@@ -180,7 +193,7 @@ def create_app(settings: Settings | None = None, engine=None) -> FastAPI:
         """Idempotent enroll: create the user or update their info, then set a
         single face. Lets the backend re-enroll on re-approval without a 409."""
         try:
-            image_bytes, faces = _extract_faces(image)
+            image_bytes, faces = _extract_enrollment_faces(image)
         except ImageTooLargeError:
             return _error(413, "image too large", "image_too_large")
         except InvalidImageError:

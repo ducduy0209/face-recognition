@@ -66,3 +66,26 @@ def test_end_to_end_enroll_recognize_delete(tmp_path, real_engine):
         assert client.delete(f"/users/{uid}").status_code == 204
         r = client.post("/recognize", files={"image": ("a.jpg", person_a, "image/jpeg")})
         assert r.json()["matched"] is False
+
+
+def _too_close_selfie(img, bbox) -> bytes:
+    """Crop exactly to the face box and blow it up to phone-photo size: the face
+    fills the frame edge to edge, like a selfie held too close."""
+    x1, y1, x2, y2 = [int(v) for v in bbox]
+    big = cv2.resize(img[y1:y2, x1:x2], (1024, 1024))
+    ok, buf = cv2.imencode(".jpg", big)
+    assert ok
+    return buf.tobytes()
+
+
+def test_padded_retry_finds_a_face_that_fills_the_frame(real_engine):
+    from insightface.data import get_image
+
+    img = get_image("t1")
+    largest = max(real_engine._app.get(img), key=lambda f: f.bbox[2] - f.bbox[0])
+    selfie = _too_close_selfie(img, largest.bbox)
+
+    assert real_engine.extract(selfie) == [], "fixture must reproduce the miss"
+    faces = real_engine.extract(selfie, pad_retry=True)
+    assert len(faces) == 1
+    assert faces[0].min_side >= 80

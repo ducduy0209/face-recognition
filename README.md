@@ -58,6 +58,11 @@ curl -X POST http://localhost:8000/recognize \
 
 Enroll errors return 422 with a `reason`: `invalid_image` | `no_face` | `multiple_faces` | `face_too_small`. A duplicate info trio returns 409.
 
+Two allowances when enrolling (not when recognizing):
+
+- **A selfie held too close** — the face fills the frame, forehead or chin cut off, and the detector finds nothing. Enrollment retries once with a border added around the photo. `/recognize` does not: check-in sends a frame every second, empty camera included, and a second pass would double the CPU per frame.
+- **Strangers in the background** — accepted when the largest face is at least twice the size of the next one; that face is enrolled. Two faces of similar size are still `multiple_faces`, since either could be the member.
+
 ## Operational notes
 
 - **Run exactly 1 worker** (already configured in the Dockerfile) — the face index lives in process RAM; multiple workers would drift out of sync.
